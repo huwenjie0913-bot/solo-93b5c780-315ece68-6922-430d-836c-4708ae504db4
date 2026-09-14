@@ -6,12 +6,19 @@
 ## 运行
 
 ```bash
-./run.sh          # 或：PYTHONUSERBASE=/workspace/.pyuser python3 app.py
+./run.sh
 ```
 
-依赖 Flask 与 numpy（已安装在 `/workspace/.pyuser`，脚本会自动设置
-`PYTHONUSERBASE`）。启动后访问 http://127.0.0.1:5000 。
-数据保存在同目录 `occultation.db`（SQLite）。
+首次启动会在项目内创建 `.venv` 虚拟环境并按 `requirements.txt`
+（Flask、numpy）自动安装依赖；若当前 Python 环境已有所需依赖则直接启动。
+也可手动安装后运行：
+
+```bash
+python3 -m pip install -r requirements.txt
+python3 app.py
+```
+
+启动后访问 http://127.0.0.1:5000 。数据保存在同目录 `occultation.db`（SQLite）。
 
 ## 功能
 
@@ -25,7 +32,9 @@
   1/σ² 加权；输出中心、尺寸、方位角、约化 χ²、参数不确定度与逐站残差。
 - **交互调整**：拖动统一时间偏移滑杆即时重拟合；点击画布上的弦线或勾选表格
   可排除/启用可疑站点；残差超过 3σ 自动标红。
-- **负观测**：显示为 ⊘ 标记；落入拟合轮廓内即红色高亮并在结果区列出冲突说明。
+- **负观测**：换算为过观测点、沿影子方向的整条“不相交弦线”（画布上以虚线
+  表示）；圆形按圆心到直线距离、椭圆在归一化单位圆空间判断直线是否与轮廓
+  相交，相交即以红色虚线弦与 ⚠ 标记醒目提示，并在结果区列出冲突说明。
 - **方案快照**：任意调整可保存为快照；选择两个快照并排查看弦线图与参数差异表。
 - **导出 JSON**：包含原始输入、弦线与拟合结果、异常说明（负观测冲突、超差残差）。
 
@@ -55,5 +64,7 @@ NEG, 站名, 观测HH:MM:SS.s, σ
 ## 文件
 
 - `app.py` — Flask 路由与 SQLite 持久化
-- `fitter.py` — 弦线换算、圆/椭圆加权拟合、负观测相容性检查
+- `fitter.py` — 弦线换算、圆/椭圆加权拟合、负观测弦线约束检查
+- `requirements.txt` — Python 依赖声明（Flask、numpy）
+- `run.sh` — 启动脚本（自动建虚拟环境并安装依赖）
 - `static/index.html` / `style.css` / `app.js` — 单页前端

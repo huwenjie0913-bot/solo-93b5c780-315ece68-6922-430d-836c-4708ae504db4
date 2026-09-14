@@ -313,19 +313,37 @@ function drawScene(canvas, result, opts = {}) {
     c._px = [x1, y1, x2, y2]; // 供点击命中
   }
 
-  // 负观测
+  // 负观测：整条不相交弦线（沿影子方向贯穿画布）+ 观测点标记
   for (const n of result.negatives || []) {
     const x = v.toX(n.qx), y = v.toY(n.qy);
     const conflict = n.inside && !n.excluded;
     const col = n.excluded ? "rgba(140,150,160,.6)" : conflict ? "#ff5c5c" : "#5cd68a";
+    // 负弦线：过观测点、沿 d 方向的直线（虚线，冲突时加粗）
+    const dx = d[0], dy = -d[1]; // 画布 y 轴翻转
+    const L = Math.hypot(W, H);
+    ctx.strokeStyle = col;
+    ctx.lineWidth = conflict ? 2.5 : 1.2;
+    ctx.setLineDash([7, 5]);
+    ctx.beginPath();
+    ctx.moveTo(x - dx * L, y - dy * L);
+    ctx.lineTo(x + dx * L, y + dy * L);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // 观测时刻对应的点标记
     ctx.strokeStyle = col; ctx.lineWidth = 2;
     ctx.beginPath(); ctx.arc(x, y, 6, 0, 7); ctx.stroke();
     ctx.beginPath();
     ctx.moveTo(x - 4.3, y + 4.3); ctx.lineTo(x + 4.3, y - 4.3);
     ctx.stroke();
+    // 冲突时加警告光晕
+    if (conflict) {
+      ctx.strokeStyle = "rgba(255,92,92,.45)";
+      ctx.lineWidth = 5;
+      ctx.beginPath(); ctx.arc(x, y, 11, 0, 7); ctx.stroke();
+    }
     ctx.fillStyle = col;
-    ctx.font = "11px sans-serif";
-    ctx.fillText(n.station + (conflict ? " ⚠冲突" : ""), x + 9, y + 4);
+    ctx.font = (conflict ? "bold " : "") + "11px sans-serif";
+    ctx.fillText(n.station + (conflict ? " ⚠负弦冲突" : ""), x + 9, y + 4);
   }
 
   // 拟合轮廓

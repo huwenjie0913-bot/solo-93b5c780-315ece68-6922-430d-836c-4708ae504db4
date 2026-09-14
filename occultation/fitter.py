@@ -12,7 +12,8 @@
   半弦长 L = v * (t2 - t1)/2
   计时误差 -> 中点沿迹不确定 v*sqrt(e1^2+e2^2)/2，半弦长不确定 v*sqrt(e1^2+e2^2)/2
 
-负观测：t 时刻星未被掩 -> 点 p - v*(t+offset-t_ref)*d 必须在轮廓之外。
+负观测：t 时刻星未被掩 -> 过点 p - v*(t+offset-t_ref)*d、沿 d 的整条
+  弦线都必须位于轮廓之外（直线与轮廓相交即冲突）。
 """
 import math
 
@@ -199,12 +200,6 @@ def _ellipse_residuals(chords, d, n):
     return func
 
 
-def _inside_ellipse(point, c, a, b, phi):
-    rel = np.array(point) - c
-    A, B = _ellipse_frame(phi)
-    return ((rel @ A) / a) ** 2 + ((rel @ B) / b) ** 2
-
-
 # ---------------------------------------------------------------- 主入口
 
 def run_fit(event, stations, observations, model, time_offset):
@@ -228,7 +223,7 @@ def run_fit(event, stations, observations, model, time_offset):
     if len(used) < (2 if model == "circle" else 3):
         result["warnings"].append(
             "有效弦线不足（%d 条），无法拟合%s" % (len(used), "圆形" if model == "circle" else "椭圆"))
-        _eval_negatives(result, negatives, None)
+        _eval_negatives(result, negatives, None, d, n)
         return result
 
     # 初值：弦线中点云的中心 + 平均视半径
@@ -303,30 +298,40 @@ def run_fit(event, stations, observations, model, time_offset):
             entry["flag"] = "残差超过 3σ，建议检查计时或排除该站"
         result["residuals"].append(entry)
 
-    _eval_negatives(result, negatives, fit)
+    _eval_negatives(result, negatives, fit, d, n)
     return result
 
 
-def _eval_negatives(result, negatives, fit):
-    """负观测与轮廓的相容性检查。"""
+def _eval_negatives(result, negatives, fit, d, n):
+    """负观测相容性检查。
+
+    负观测（未发生掩星）意味着过 q、沿影子运动方向 d 的整条弦线
+    都必须位于轮廓之外；直线与轮廓相交即为冲突。
+    """
     for neg in negatives:
         neg.pop("inside", None); neg.pop("margin_km", None)
         if fit is None:
             continue
-        c = (fit["cx"], fit["cy"])
+        c = np.array([fit["cx"], fit["cy"]])
+        q = np.array([neg["qx"], neg["qy"]])
         if fit["model"] == "circle":
-            dist = math.hypot(neg["qx"] - c[0], neg["qy"] - c[1])
+            # 直线到圆心的垂直距离 < R 即相交
+            dist = abs(float(n @ (q - c)))
             inside = dist < fit["R"]
             margin = dist - fit["R"]
         else:
-            val = _inside_ellipse((neg["qx"], neg["qy"]), c,
-                                  fit["a"], fit["b"], fit["phi"])
-            rn = math.sqrt(val)
-            inside = rn < 1.0
-            margin = (rn - 1.0) * (fit["a"] + fit["b"]) / 2.0  # 近似公里数
+            # 归一化到单位圆后判断直线与单位圆是否相交
+            A, B = _ellipse_frame(fit["phi"])
+            rel = q - c
+            xn = np.array([rel @ A / fit["a"], rel @ B / fit["b"]])
+            dn = np.array([d @ A / fit["a"], d @ B / fit["b"]])
+            norm = float(np.linalg.norm(dn))
+            dist_n = (abs(xn[0] * dn[1] - xn[1] * dn[0]) / norm) if norm else 0.0
+            inside = dist_n < 1.0
+            margin = (dist_n - 1.0) * (fit["a"] + fit["b"]) / 2.0  # 近似公里数
         neg["inside"] = bool(inside)
         neg["margin_km"] = margin
         if inside and not neg["excluded"]:
             result["conflicts"].append(
-                "负观测站 %s 位于拟合轮廓内约 %.1f km，与“未发生掩星”矛盾"
+                "负观测站 %s 的弦线穿过拟合轮廓（深入约 %.1f km），与“未发生掩星”矛盾"
                 % (neg["station"], -margin))
