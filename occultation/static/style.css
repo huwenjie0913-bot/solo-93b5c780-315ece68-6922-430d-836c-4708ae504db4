@@ -77,3 +77,26 @@ canvas { display: block; width: 100%; border-radius: 6px; background: #0d1b2a; }
 #rngOffset { width: 100%; }
 #offsetVal { color: #2f6db3; }
 .badge { font-size: 11px; padding: 1px 6px; border-radius: 8px; background: #e8eef6; color: #39536e; }
+
+/* ---------------- 光变曲线判读 ---------------- */
+.lcBody { width: 96vw; }
+.lcBody h2 { font-size: 16px; margin: 0; color: #16324f; }
+.lcGrid { display: grid; grid-template-columns: 300px 1fr; gap: 14px; margin-top: 10px; }
+.lcSide h3, .lcMain h3 { font-size: 13px; margin: 12px 0 4px; color: #16324f; }
+.lcSide select, .lcSide input, .lcSide textarea { width: 100%; margin: 3px 0; }
+.lcSide > button { margin: 3px 0; }
+.lcSide .snapList li { gap: 4px; align-items: center; }
+.lcSide .snapList li input[type="checkbox"] { flex: 0 0 auto; }
+.lcSide .snapList button { padding: 2px 6px; font-size: 12px; }
+.lcToolbar {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  margin-bottom: 6px; font-size: 12.5px;
+}
+.lcToolbar button, .lcToolbar select { padding: 4px 8px; font-size: 12.5px; }
+.lcToolbar label { margin: 0; display: flex; gap: 4px; align-items: center; }
+.lcMode { background: #6b7a8c; }
+.lcMode.active { background: #2f6db3; outline: 2px solid #9ec5ff; }
+#lcCanvas { width: 100%; cursor: crosshair; }
+#lcResidCanvas { width: 100%; margin-top: 6px; }
+#lcCmpTable { font-size: 12px; }
+#lcResult { margin-top: 8px; }

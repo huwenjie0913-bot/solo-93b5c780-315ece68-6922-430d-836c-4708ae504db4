@@ -8,6 +8,7 @@ import time
 from flask import Flask, g, jsonify, request, send_from_directory
 
 import fitter
+import lightcurve
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE, "occultation.db")
@@ -43,7 +44,9 @@ CREATE TABLE IF NOT EXISTS observations (
   t1 REAL,                         -- 正:消失时刻 负:观测时刻（秒）
   t2 REAL,                         -- 正:复现时刻
   err1 REAL DEFAULT 0.0,           -- 对应计时误差 s
-  err2 REAL DEFAULT 0.0
+  err2 REAL DEFAULT 0.0,
+  origin TEXT NOT NULL DEFAULT 'manual',  -- manual | lightcurve（判读写入）
+  lc_version_id INTEGER            -- 产生该观测的判读版本
 );
 CREATE TABLE IF NOT EXISTS snapshots (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,6 +54,26 @@ CREATE TABLE IF NOT EXISTS snapshots (
   label TEXT NOT NULL,
   created_at REAL,
   payload TEXT NOT NULL            -- JSON：事件参数+站点+观测+拟合结果
+);
+CREATE TABLE IF NOT EXISTS lightcurves (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  station_id INTEGER NOT NULL REFERENCES stations(id) ON DELETE CASCADE,
+  name TEXT NOT NULL DEFAULT '',
+  created_at REAL,
+  csv_text TEXT NOT NULL DEFAULT '',  -- 原始 CSV 文本
+  n_points INTEGER NOT NULL DEFAULT 0,
+  t_start REAL, t_end REAL,
+  series TEXT NOT NULL                -- JSON：t/flux/err/exp 原始序列
+);
+CREATE TABLE IF NOT EXISTS lc_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  lightcurve_id INTEGER NOT NULL REFERENCES lightcurves(id) ON DELETE CASCADE,
+  label TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'draft',  -- draft | confirmed | superseded
+  created_at REAL,
+  confirmed_at REAL,
+  settings TEXT NOT NULL,           -- JSON：基线区间/屏蔽点/基线阶数
+  result TEXT NOT NULL              -- JSON：拟合结果（标量、基线与说明）
 );
 """
 
@@ -75,6 +98,13 @@ def close_db(_):
 def init_db():
     db = sqlite3.connect(DB_PATH)
     db.executescript(SCHEMA)
+    # 迁移：observations 增加判读来源标记（旧库无此列）
+    cols = [r[1] for r in db.execute("PRAGMA table_info(observations)")]
+    if "origin" not in cols:
+        db.execute("ALTER TABLE observations "
+                   "ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual'")
+    if "lc_version_id" not in cols:
+        db.execute("ALTER TABLE observations ADD COLUMN lc_version_id INTEGER")
     db.commit()
     db.close()
 
@@ -242,6 +272,33 @@ def add_observation(sid):
                        (cur.lastrowid,))), 201
 
 
+@app.put("/api/observations/<int:oid>")
+def update_observation(oid):
+    """手工修改观测时刻/误差。修改后该观测标记为 manual，
+    后续判读版本确认时不会再覆盖它。"""
+    d = request.get_json(force=True)
+    o = row("SELECT * FROM observations WHERE id=?", (oid,))
+    if not o:
+        return err("观测不存在", 404)
+    fields, args = [], []
+    for k in ("t1", "t2", "err1", "err2"):
+        if k in d:
+            fields.append(f"{k}=?")
+            args.append(None if d[k] is None else float(d[k]))
+    if not fields:
+        return err("没有可更新的字段")
+    merged = dict(o)
+    merged.update({k: v for k, v in d.items() if k in ("t1", "t2")})
+    if o["kind"] == "positive" and merged.get("t1") is not None \
+            and merged.get("t2") is not None and merged["t2"] <= merged["t1"]:
+        return err("复现时刻应晚于消失时刻")
+    fields.append("origin='manual'")   # 手工修改后脱离判读自动维护
+    args.append(oid)
+    get_db().execute(f"UPDATE observations SET {','.join(fields)} WHERE id=?", args)
+    get_db().commit()
+    return jsonify(row("SELECT * FROM observations WHERE id=?", (oid,)))
+
+
 @app.delete("/api/observations/<int:oid>")
 def delete_observation(oid):
     get_db().execute("DELETE FROM observations WHERE id=?", (oid,))
@@ -381,6 +438,226 @@ def delete_snapshot(sid):
     get_db().execute("DELETE FROM snapshots WHERE id=?", (sid,))
     get_db().commit()
     return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------- 光变曲线判读
+
+def _lc_versions(lcid):
+    vers = rows("SELECT * FROM lc_versions WHERE lightcurve_id=? "
+                "ORDER BY id DESC", (lcid,))
+    for v in vers:
+        v["settings"] = json.loads(v["settings"])
+        v["result"] = json.loads(v["result"])
+    return vers
+
+
+def _lc_state(lcid):
+    lc = row("SELECT * FROM lightcurves WHERE id=?", (lcid,))
+    if not lc:
+        return None
+    lc.pop("csv_text", None)           # 原始 CSV 留存库中，不必每次下发
+    lc["series"] = json.loads(lc["series"])
+    lc["versions"] = _lc_versions(lcid)
+    return lc
+
+
+def _insert_lightcurve(sid, name, csv_text, series):
+    cur = get_db().execute(
+        "INSERT INTO lightcurves(station_id,name,created_at,csv_text,"
+        "n_points,t_start,t_end,series) VALUES(?,?,?,?,?,?,?,?)",
+        (sid, name, time.time(), csv_text, len(series["t"]),
+         series["t"][0], series["t"][-1],
+         json.dumps({k: series[k] for k in ("t", "flux", "err", "exp")})))
+    get_db().commit()
+    return cur.lastrowid
+
+
+@app.get("/api/stations/<int:sid>/lightcurves")
+def list_lightcurves(sid):
+    return jsonify(rows(
+        "SELECT id,station_id,name,created_at,n_points,t_start,t_end "
+        "FROM lightcurves WHERE station_id=? ORDER BY id DESC", (sid,)))
+
+
+@app.post("/api/stations/<int:sid>/lightcurves")
+def import_lightcurve(sid):
+    """导入 “时间,流量,误差,曝光时长” CSV（时间支持 HH:MM:SS.s 或秒）。"""
+    if not row("SELECT * FROM stations WHERE id=?", (sid,)):
+        return err("站点不存在", 404)
+    d = request.get_json(force=True) or {}
+    try:
+        series, errors = lightcurve.parse_csv(d.get("text", ""))
+    except lightcurve.LcError as ex:
+        return err(str(ex))
+    name = d.get("name") or "光变曲线 %s" % time.strftime("%H:%M:%S")
+    lcid = _insert_lightcurve(sid, name, d.get("text", ""), series)
+    state = _lc_state(lcid)
+    state["import_errors"] = errors
+    return jsonify(state), 201
+
+
+@app.post("/api/stations/<int:sid>/lightcurves/demo")
+def demo_lightcurve(sid):
+    """生成一条示例光变曲线（含噪声与离群点），用于练习判读流程。"""
+    if not row("SELECT * FROM stations WHERE id=?", (sid,)):
+        return err("站点不存在", 404)
+    s = lightcurve.demo_series(seed=20260914 + sid)
+    lines = ["# time, flux, err, exp"]
+    for i in range(len(s["t"])):
+        lines.append("%.2f, %.5f, %.4f, %.2f"
+                     % (s["t"][i], s["flux"][i], s["err"][i], s["exp"][i]))
+    lcid = _insert_lightcurve(sid, "示例曲线", "\n".join(lines), s)
+    state = _lc_state(lcid)
+    state["truth"] = s["truth"]
+    return jsonify(state), 201
+
+
+@app.get("/api/lightcurves/<int:lcid>")
+def get_lightcurve(lcid):
+    lc = _lc_state(lcid)
+    return jsonify(lc) if lc else err("光变曲线不存在", 404)
+
+
+@app.delete("/api/lightcurves/<int:lcid>")
+def delete_lightcurve(lcid):
+    get_db().execute("DELETE FROM lightcurves WHERE id=?", (lcid,))
+    get_db().commit()
+    return jsonify({"ok": True})
+
+
+def _lc_fit_input(lcid):
+    lc = row("SELECT * FROM lightcurves WHERE id=?", (lcid,))
+    if not lc:
+        return None, None, None
+    d = request.get_json(force=True) or {}
+    settings = {
+        "baselines": d.get("baselines") or {},
+        "masked": [int(i) for i in (d.get("masked") or [])],
+        "degree": 1 if int(d.get("degree", 1)) else 0,
+    }
+    return lc, json.loads(lc["series"]), settings
+
+
+@app.post("/api/lightcurves/<int:lcid>/preview")
+def lc_preview(lcid):
+    """归一化预览：返回归一化序列与基线（不落库）。"""
+    lc, series, settings = _lc_fit_input(lcid)
+    if not lc:
+        return err("光变曲线不存在", 404)
+    try:
+        norm = lightcurve.normalize(series, settings["baselines"],
+                                    settings["masked"], settings["degree"])
+    except lightcurve.LcError as ex:
+        return err(str(ex))
+    return jsonify({"norm": norm})
+
+
+@app.post("/api/lightcurves/<int:lcid>/fit")
+def lc_fit(lcid):
+    """双阶跃拟合（不落库）。返回模型曲线、残差、不确定度与失败原因。"""
+    lc, series, settings = _lc_fit_input(lcid)
+    if not lc:
+        return err("光变曲线不存在", 404)
+    result = lightcurve.fit_curve(series, settings["baselines"],
+                                  settings["masked"], settings["degree"])
+    return jsonify(result)
+
+
+@app.post("/api/lightcurves/<int:lcid>/versions")
+def save_lc_version(lcid):
+    """把当前判读（基线区间+屏蔽点+拟合设置）保存为版本；
+    服务端按设置重算拟合，保证版本内容可复查。"""
+    lc, series, settings = _lc_fit_input(lcid)
+    if not lc:
+        return err("光变曲线不存在", 404)
+    d = request.get_json(force=True) or {}
+    result = lightcurve.fit_curve(series, settings["baselines"],
+                                  settings["masked"], settings["degree"])
+    label = d.get("label") or "判读 %s" % time.strftime("%H:%M:%S")
+    cur = get_db().execute(
+        "INSERT INTO lc_versions(lightcurve_id,label,status,created_at,"
+        "settings,result) VALUES(?,?,'draft',?,?,?)",
+        (lcid, label, time.time(),
+         json.dumps(settings, ensure_ascii=False),
+         json.dumps(lightcurve.trim_result(result), ensure_ascii=False)))
+    get_db().commit()
+    return jsonify({"id": cur.lastrowid, "label": label,
+                    "versions": _lc_versions(lcid)}), 201
+
+
+@app.get("/api/lcversions/<int:vid>")
+def get_lc_version(vid):
+    v = row("SELECT * FROM lc_versions WHERE id=?", (vid,))
+    if not v:
+        return err("版本不存在", 404)
+    v["settings"] = json.loads(v["settings"])
+    v["result"] = json.loads(v["result"])
+    return jsonify(v)
+
+
+@app.delete("/api/lcversions/<int:vid>")
+def delete_lc_version(vid):
+    v = row("SELECT lightcurve_id FROM lc_versions WHERE id=?", (vid,))
+    if not v:
+        return err("版本不存在", 404)
+    get_db().execute("DELETE FROM lc_versions WHERE id=?", (vid,))
+    get_db().commit()
+    return jsonify({"versions": _lc_versions(v["lightcurve_id"])})
+
+
+@app.post("/api/lcversions/<int:vid>/confirm")
+def confirm_lc_version(vid):
+    """确认版本：把拟合时刻写入该站正观测。
+
+    保护规则：站点若存在手工填写/修改过的正观测（origin='manual'），
+    拒绝覆盖并说明；只更新此前由判读写入的观测。
+    """
+    v = row("SELECT * FROM lc_versions WHERE id=?", (vid,))
+    if not v:
+        return err("版本不存在", 404)
+    result = json.loads(v["result"])
+    if not result.get("ok"):
+        return err("该版本拟合未成功，没有可写入的接触时刻：%s"
+                   % "；".join(result.get("reasons") or ["未知原因"]))
+    lc = row("SELECT * FROM lightcurves WHERE id=?", (v["lightcurve_id"],))
+    sid = lc["station_id"]
+    positives = rows("SELECT * FROM observations WHERE station_id=? "
+                     "AND kind='positive' ORDER BY id", (sid,))
+    manual = [o for o in positives if o.get("origin", "manual") == "manual"]
+    if manual:
+        return jsonify({
+            "ok": False, "protected": True,
+            "error": "该站已有手工填写/修改的正观测时刻（%d 条），"
+                     "为避免覆盖手工数据，本次未写入。请先删除对应观测记录，"
+                     "再重新确认版本。" % len(manual),
+            "manual_obs": manual,
+        }), 409
+    D, R = float(result["D"]), float(result["R"])
+    sD = float(result.get("sig_D") or 0.0)
+    sR = float(result.get("sig_R") or 0.0)
+    db = get_db()
+    own = [o for o in positives if o.get("origin") == "lightcurve"]
+    if own:
+        oid = own[0]["id"]
+        db.execute("UPDATE observations SET t1=?,t2=?,err1=?,err2=?,"
+                   "lc_version_id=? WHERE id=?", (D, R, sD, sR, vid, oid))
+        action = "updated"
+    else:
+        cur = db.execute(
+            "INSERT INTO observations(station_id,kind,t1,t2,err1,err2,"
+            "origin,lc_version_id) VALUES(?,'positive',?,?,?,?,'lightcurve',?)",
+            (sid, D, R, sD, sR, vid))
+        oid = cur.lastrowid
+        action = "created"
+    db.execute("UPDATE lc_versions SET status='superseded' "
+               "WHERE lightcurve_id=? AND status='confirmed' AND id<>?",
+               (v["lightcurve_id"], vid))
+    db.execute("UPDATE lc_versions SET status='confirmed', confirmed_at=? "
+               "WHERE id=?", (time.time(), vid))
+    db.commit()
+    return jsonify({"ok": True, "action": action, "observation_id": oid,
+                    "t1": D, "t2": R, "err1": sD, "err2": sR,
+                    "versions": _lc_versions(v["lightcurve_id"])})
 
 
 # ---------------------------------------------------------------- 示例数据

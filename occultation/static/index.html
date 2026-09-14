@@ -12,6 +12,7 @@
   <div class="hdr-controls">
     <select id="eventSelect" title="选择事件"></select>
     <button id="btnNewEvent">新建事件</button>
+    <button id="btnLc" disabled>光变曲线判读</button>
     <button id="btnExport" disabled>导出 JSON</button>
   </div>
 </header>
@@ -166,6 +167,65 @@
   </div>
 </div>
 
+<!-- 光变曲线判读 -->
+<div id="lcModal" class="modal hidden">
+  <div class="modalBody lcBody">
+    <div class="row spaceBetween">
+      <h2>光变曲线判读</h2>
+      <button id="btnCloseLc">关闭</button>
+    </div>
+    <div class="lcGrid">
+      <div class="lcSide">
+        <h3>站点与曲线</h3>
+        <select id="lcStation"></select>
+        <select id="lcCurve"></select>
+        <button id="btnLcDelCurve">删除当前曲线</button>
+        <h3>导入 CSV（时间,流量,误差,曝光时长）</h3>
+        <input id="lcName" placeholder="曲线名称（可空）">
+        <textarea id="lcCsv" rows="5" placeholder="03:14:00.00, 1.002, 0.012, 0.18&#10;03:14:00.20, 0.998, 0.012, 0.18&#10;…（时间也支持秒数；可带表头）"></textarea>
+        <div class="row">
+          <button id="btnLcImport">导入</button>
+          <button id="btnLcDemo">示例曲线</button>
+        </div>
+        <div id="lcImportMsg" class="hint"></div>
+        <h3>判读版本</h3>
+        <p class="hint">勾选两个版本可在下方比较时刻差异。</p>
+        <ul id="lcVersions" class="snapList"></ul>
+      </div>
+      <div class="lcMain">
+        <div class="lcToolbar">
+          <span>模式</span>
+          <button data-lcmode="pan" class="lcMode active">缩放/平移</button>
+          <button data-lcmode="pre" class="lcMode">框选前基线</button>
+          <button data-lcmode="post" class="lcMode">框选后基线</button>
+          <button data-lcmode="mask" class="lcMode">屏蔽点</button>
+          <button id="btnLcClearMask">清除屏蔽</button>
+          <select id="lcDegree" title="基线形式">
+            <option value="1">线性基线</option>
+            <option value="0">常数基线</option>
+          </select>
+          <label><input type="checkbox" id="lcShowNorm"> 归一化预览</label>
+          <button id="btnLcFit">拟合接触时刻</button>
+          <button id="btnLcSaveVer">保存为版本</button>
+        </div>
+        <canvas id="lcCanvas" width="880" height="380"></canvas>
+        <canvas id="lcResidCanvas" width="880" height="130"></canvas>
+        <div class="hint">滚轮缩放、拖拽平移、双击复位；屏蔽模式下单击切换单个点、拖框批量屏蔽。绿色区域为基线区间。</div>
+        <div id="lcFitNote" class="hint"></div>
+        <div id="lcResult" class="kv"></div>
+        <div id="lcWarn" class="conflicts"></div>
+        <h3>版本比较</h3>
+        <table id="lcCmpTable">
+          <thead><tr><th>版本</th><th>消失 D</th><th>σD(s)</th><th>复现 R</th><th>σR(s)</th>
+            <th>时长(s)</th><th>深度</th><th>约化χ²</th><th>ΔD(s)</th><th>ΔR(s)</th><th>Δ时长(s)</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="app.js"></script>
+<script src="lightcurve.js"></script>
 </body>
 </html>

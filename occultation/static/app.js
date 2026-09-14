@@ -49,7 +49,11 @@ async function refreshEvents(selectId) {
   }
   if (selectId) sel.value = selectId;
   if (state.events.length) await loadEvent(+sel.value);
-  else { state.event = null; state.fit = null; renderAll(); }
+  else {
+    state.event = null; state.fit = null;
+    $("btnLc").disabled = true;
+    renderAll();
+  }
 }
 
 async function loadEvent(id) {
@@ -63,6 +67,7 @@ async function loadEvent(id) {
   $("numOffset").value = state.event.time_offset;
   $("offsetVal").textContent = fmt(state.event.time_offset);
   $("btnExport").disabled = false;
+  $("btnLc").disabled = false;
   await refit();
 }
 
@@ -127,17 +132,38 @@ function renderObservations() {
       : fmtTime(o.t1);
     const errs = o.kind === "positive"
       ? `${fmt(o.err1)}/${fmt(o.err2)}` : fmt(o.err1);
+    const kindLabel = o.kind === "positive" ? "正" : "负";
+    const originBadge = o.origin === "lightcurve"
+      ? ' <span class="badge" title="由光变曲线判读写入">判读</span>' : "";
     tr.innerHTML = `<td>${o.station_name}</td>
-      <td>${o.kind === "positive" ? "正" : "负"}</td>
+      <td>${kindLabel}${originBadge}</td>
       <td>${times}</td><td>${errs}</td>`;
     const td = document.createElement("td");
+    const btnEdit = document.createElement("button");
+    btnEdit.textContent = "改";
+    btnEdit.title = "手工修改时刻（修改后判读版本确认不再覆盖该观测）";
+    btnEdit.onclick = async () => {
+      if (o.kind === "positive") {
+        const t1 = parseTime(prompt("消失时刻 HH:MM:SS.s", fmtTime(o.t1)));
+        if (t1 == null) return;
+        const t2 = parseTime(prompt("复现时刻 HH:MM:SS.s", fmtTime(o.t2)));
+        if (t2 == null) return;
+        if (t2 <= t1) return alert("复现时刻应晚于消失时刻");
+        await api(`/api/observations/${o.id}`, "PUT", { t1, t2 });
+      } else {
+        const t1 = parseTime(prompt("观测时刻 HH:MM:SS.s", fmtTime(o.t1)));
+        if (t1 == null) return;
+        await api(`/api/observations/${o.id}`, "PUT", { t1 });
+      }
+      await refit();
+    };
     const btn = document.createElement("button");
     btn.textContent = "删";
     btn.onclick = async () => {
       await api(`/api/observations/${o.id}`, "DELETE");
       await refit();
     };
-    td.appendChild(btn);
+    td.append(btnEdit, btn);
     tr.appendChild(td);
     tb.appendChild(tr);
   }
@@ -603,6 +629,10 @@ function bind() {
   $("btnExport").onclick = () => {
     if (state.event) window.open(`/api/events/${state.event.id}/export`, "_blank");
   };
+
+  // 光变曲线判读模块入口（lightcurve.js）
+  $("btnLc").onclick = () => lcOpen();
+  window.lcAfterConfirm = async () => { await refit(); };
 
   $("btnSaveSnap").onclick = async () => {
     if (!state.event) return;
